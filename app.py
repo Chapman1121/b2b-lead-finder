@@ -19,7 +19,7 @@ import streamlit as st
 @st.cache_resource
 def _install_playwright_browser():
     result = subprocess.run(
-        [sys.executable, "-m", "playwright", "install", "--with-deps", "chromium"],
+        [sys.executable, "-m", "playwright", "install", "chromium"],
         capture_output=True, text=True
     )
     return result.returncode

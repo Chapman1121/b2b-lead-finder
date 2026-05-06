@@ -80,12 +80,12 @@ def main(query, location, job_id):
 
     update_file(job_file, [], "🌐 Opening Google Maps …")
 
-    # Ensure Playwright Chromium is installed (critical on Streamlit Cloud)
+    # Ensure Playwright Chromium binary is downloaded (system libs come from packages.txt)
     update_file(job_file, [], "🔧 Checking browser installation …")
     try:
         subprocess.run(
             [sys.executable, "-m", "playwright", "install", "chromium"],
-            capture_output=True, timeout=120
+            capture_output=True, timeout=180
         )
     except Exception as e:
         update_file(job_file, [], f"⚠️ Browser install warning: {e} — trying anyway …")
