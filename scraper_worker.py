@@ -8,12 +8,11 @@ import re
 import sys
 import json
 import time
+import subprocess
 from pathlib import Path
 from playwright.sync_api import sync_playwright
 
 # ─── Location metadata ────────────────────────────────────────────────────────
-# Coordinates bias the Google Maps search to the correct area.
-# Format: "@lat,lng,zoomz"  (zoom 12–15 for districts, 9–11 for states)
 LOCATION_META = {
     # ── Singapore ──
     "Singapore":          {"coords": "@1.3521,103.8198,12z", "label": "Singapore"},
@@ -63,12 +62,15 @@ LOCATION_META = {
 
 
 def update_file(job_file: Path, leads, message, status="running", total=0):
-    job_file.write_text(json.dumps({
-        "status" : status,
-        "message": message,
-        "leads"  : leads,
-        "total"  : total,
-    }, ensure_ascii=False), encoding="utf-8")
+    try:
+        job_file.write_text(json.dumps({
+            "status" : status,
+            "message": message,
+            "leads"  : leads,
+            "total"  : total,
+        }, ensure_ascii=False), encoding="utf-8")
+    except Exception:
+        pass
 
 
 def main(query, location, job_id):
@@ -78,230 +80,244 @@ def main(query, location, job_id):
 
     update_file(job_file, [], "🌐 Opening Google Maps …")
 
+    # Ensure Playwright Chromium is installed (critical on Streamlit Cloud)
+    update_file(job_file, [], "🔧 Checking browser installation …")
+    try:
+        subprocess.run(
+            [sys.executable, "-m", "playwright", "install", "chromium"],
+            capture_output=True, timeout=120
+        )
+    except Exception as e:
+        update_file(job_file, [], f"⚠️ Browser install warning: {e} — trying anyway …")
+
     # Build search label and URL
-    meta   = LOCATION_META.get(location, {})
-    label  = meta.get("label", location)
-    coords = meta.get("coords", "")
-
+    meta        = LOCATION_META.get(location, {})
+    label       = meta.get("label", location)
+    coords      = meta.get("coords", "")
     search_term = f"{query} {label}"
-    seen  = set()
-    leads = []
+    seen        = set()
+    leads       = []
 
-    with sync_playwright() as p:
-        browser = p.chromium.launch(
-            headless=True,
-            args=[
-                "--no-sandbox",
-                "--disable-setuid-sandbox",
-                "--disable-dev-shm-usage",
-                "--disable-gpu",
-                "--disable-blink-features=AutomationControlled",
-                "--window-size=1280,900",
-            ],
-        )
-        context = browser.new_context(
-            viewport={"width": 1280, "height": 900},
-            locale="en-US",
-            user_agent=(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/124.0.0.0 Safari/537.36"
-            ),
-        )
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(
+                headless=True,
+                args=[
+                    "--no-sandbox",
+                    "--disable-setuid-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-gpu",
+                    "--disable-blink-features=AutomationControlled",
+                    "--window-size=1280,900",
+                ],
+            )
+            context = browser.new_context(
+                viewport={"width": 1280, "height": 900},
+                locale="en-US",
+                user_agent=(
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/124.0.0.0 Safari/537.36"
+                ),
+            )
 
-        # Bypass Google consent wall
-        context.add_cookies([
-            {"name": "CONSENT", "value": "YES+cb.20231002-17-p0.en+FX+410",
-             "domain": ".google.com", "path": "/"},
-            {"name": "SOCS",    "value": "CAESEwgDEgk0NTc4MDU1NzIaAmVuIAEaBgiAv5SmBg",
-             "domain": ".google.com", "path": "/"},
-        ])
+            # Bypass Google consent wall
+            context.add_cookies([
+                {"name": "CONSENT", "value": "YES+cb.20231002-17-p0.en+FX+410",
+                 "domain": ".google.com", "path": "/"},
+                {"name": "SOCS",    "value": "CAESEwgDEgk0NTc4MDU1NzIaAmVuIAEaBgiAv5SmBg",
+                 "domain": ".google.com", "path": "/"},
+            ])
 
-        page = context.new_page()
+            page = context.new_page()
 
-        # Coordinate-biased URL — pins the search to the right area
-        encoded = search_term.replace(" ", "+")
-        if coords:
-            url = f"https://www.google.com/maps/search/{encoded}/{coords}"
-        else:
-            url = f"https://www.google.com/maps/search/{encoded}/"
+            # Coordinate-biased URL — pins the search to the right area
+            encoded = search_term.replace(" ", "+")
+            url = (f"https://www.google.com/maps/search/{encoded}/{coords}"
+                   if coords else
+                   f"https://www.google.com/maps/search/{encoded}/")
 
-        page.goto(url, wait_until="domcontentloaded", timeout=60000)
-        time.sleep(3)
-
-        # Dismiss any remaining consent dialogs
-        for sel in ["button:has-text('Accept all')", "button:has-text('Reject all')",
-                    "#L2AGLb", "button:has-text('Agree')"]:
-            try:
-                page.click(sel, timeout=2000)
-                time.sleep(1)
-                break
-            except Exception:
-                pass
-
-        # Wait for feed
-        update_file(job_file, leads, "⏳ Waiting for results feed …")
-        try:
-            page.wait_for_selector("div[role='feed']", timeout=20000)
-        except Exception:
+            update_file(job_file, leads, "🌐 Opening Google Maps …")
             page.goto(url, wait_until="domcontentloaded", timeout=60000)
             time.sleep(3)
+
+            # Dismiss any remaining consent dialogs
+            for sel in ["button:has-text('Accept all')", "button:has-text('Reject all')",
+                        "#L2AGLb", "button:has-text('Agree')"]:
+                try:
+                    page.click(sel, timeout=2000)
+                    time.sleep(1)
+                    break
+                except Exception:
+                    pass
+
+            # Wait for feed
+            update_file(job_file, leads, "⏳ Waiting for results feed …")
             try:
-                page.wait_for_selector("div[role='feed']", timeout=15000)
+                page.wait_for_selector("div[role='feed']", timeout=20000)
             except Exception:
+                page.goto(url, wait_until="domcontentloaded", timeout=60000)
+                time.sleep(3)
+                try:
+                    page.wait_for_selector("div[role='feed']", timeout=15000)
+                except Exception:
+                    update_file(job_file, leads,
+                                f"❌ Could not load results. URL: {page.url}",
+                                status="done")
+                    browser.close()
+                    return
+
+            # Scroll to load listings — stop early if end-of-list detected
+            update_file(job_file, leads, "📜 Scrolling to load listings …")
+            no_new_count = 0
+            prev_count   = 0
+            for scroll_i in range(60):
+                page.evaluate("""() => {
+                    const f = document.querySelector("div[role='feed']");
+                    if (f) f.scrollTop += 700;
+                }""")
+                time.sleep(0.6)
+
+                end_reached = page.evaluate("""() => {
+                    const spans = document.querySelectorAll("span");
+                    for (const s of spans) {
+                        if (s.innerText && s.innerText.includes("reached the end")) return true;
+                    }
+                    return false;
+                }""")
+                if end_reached:
+                    break
+
+                if scroll_i % 8 == 7:
+                    cur = len(page.query_selector_all("a[href*='/maps/place/']"))
+                    if cur == prev_count:
+                        no_new_count += 1
+                        if no_new_count >= 2:
+                            break
+                    else:
+                        no_new_count = 0
+                    prev_count = cur
+
+            time.sleep(1)
+
+            # Collect unique place URLs
+            cards = page.query_selector_all("a[href*='/maps/place/']")
+            seen_hrefs, place_urls = set(), []
+            for c in cards:
+                href  = c.get_attribute("href") or ""
+                clean = href.split("?")[0]
+                if clean and "/maps/place/" in clean and clean not in seen_hrefs:
+                    seen_hrefs.add(clean)
+                    place_urls.append(href)
+
+            total = len(place_urls)
+            update_file(job_file, leads, f"📌 Found {total} listings. Extracting …", total=total)
+
+            if total == 0:
                 update_file(job_file, leads,
-                            f"❌ Could not load results. URL: {page.url}",
+                            f"❌ Found 0 listings. Page title: {page.title()}",
                             status="done")
                 browser.close()
                 return
 
-        # Scroll to load listings — stop early if end-of-list detected
-        update_file(job_file, leads, "📜 Scrolling to load listings …")
-        no_new_count = 0
-        prev_count   = 0
-        for scroll_i in range(60):            # up to 60 scrolls (~36 s)
-            page.evaluate("""() => {
-                const f = document.querySelector("div[role='feed']");
-                if (f) f.scrollTop += 700;
-            }""")
-            time.sleep(0.6)
-
-            # Detect "You've reached the end of the list"
-            end_reached = page.evaluate("""() => {
-                const spans = document.querySelectorAll("span");
-                for (const s of spans) {
-                    if (s.innerText && s.innerText.includes("reached the end")) return true;
-                }
-                return false;
-            }""")
-            if end_reached:
-                break
-
-            # Also stop if no new cards found after 8 scrolls
-            if scroll_i % 8 == 7:
-                cur = len(page.query_selector_all("a[href*='/maps/place/']"))
-                if cur == prev_count:
-                    no_new_count += 1
-                    if no_new_count >= 2:
-                        break
-                else:
-                    no_new_count = 0
-                prev_count = cur
-
-        time.sleep(1)
-
-        # Collect unique place URLs (strings, not element handles — handles go stale)
-        cards = page.query_selector_all("a[href*='/maps/place/']")
-        seen_hrefs, place_urls = set(), []
-        for c in cards:
-            href  = c.get_attribute("href") or ""
-            clean = href.split("?")[0]
-            if clean and "/maps/place/" in clean and clean not in seen_hrefs:
-                seen_hrefs.add(clean)
-                place_urls.append(href)
-
-        total = len(place_urls)
-        update_file(job_file, leads, f"📌 Found {total} listings. Extracting …", total=total)
-
-        if total == 0:
-            update_file(job_file, leads,
-                        f"❌ Found 0 listings. Page title: {page.title()}",
-                        status="done")
-            browser.close()
-            return
-
-        for place_url in place_urls[:120]:    # allow up to 120 leads per search
-            try:
-                page.goto(place_url, wait_until="domcontentloaded", timeout=30000)
-
-                # Wait for the name heading instead of a fixed sleep
+            for place_url in place_urls[:120]:
                 try:
-                    page.wait_for_selector("h1", timeout=8000)
+                    page.goto(place_url, wait_until="domcontentloaded", timeout=30000)
+
+                    try:
+                        page.wait_for_selector("h1", timeout=8000)
+                    except Exception:
+                        continue
+
+                    # Name
+                    name = ""
+                    for sel in ["h1.DUwDvf", "h1[class*='fontHeadline']", "h1"]:
+                        el = page.query_selector(sel)
+                        if el:
+                            name = (el.inner_text() or "").strip()
+                            if name:
+                                break
+                    if not name or name in seen:
+                        continue
+                    seen.add(name)
+
+                    # Rating
+                    rating = ""
+                    for sel in ["div.F7nice span[aria-hidden='true']",
+                                "span.ceNzKf[aria-hidden='true']",
+                                "span[aria-hidden='true']"]:
+                        el = page.query_selector(sel)
+                        if el:
+                            t = (el.inner_text() or "").strip()
+                            if re.match(r"^\d[\d.]*$", t):
+                                rating = t
+                                break
+
+                    # Reviews
+                    reviews = 0
+                    for sel in ["span[aria-label*='review']", "button[aria-label*='review']",
+                                "span[aria-label*='Rating']"]:
+                        el = page.query_selector(sel)
+                        if el:
+                            m = re.search(r"([\d,]+)", el.get_attribute("aria-label") or "")
+                            if m:
+                                reviews = int(m.group(1).replace(",", ""))
+                                break
+
+                    # Category, address, phone, website
+                    def get_text(sels):
+                        for s in sels:
+                            el = page.query_selector(s)
+                            if el:
+                                t = (el.inner_text() or "").strip()
+                                if t:
+                                    return t
+                        return ""
+
+                    category = get_text(["button.DkEaL", "span.mgr77e", "button[jsaction*='category']"])
+                    address  = get_text(["button[data-item-id='address'] .rogA2c",
+                                         "button[data-item-id='address']",
+                                         "[data-tooltip='Copy address']"])
+                    phone    = get_text(["button[data-item-id*='phone'] .rogA2c",
+                                         "button[data-item-id*='phone']",
+                                         "[data-tooltip='Copy phone number']"])
+
+                    website = ""
+                    for sel in ["a[data-item-id='authority']", "a[aria-label*='ebsite']",
+                                "a[data-tooltip='Open website']"]:
+                        el = page.query_selector(sel)
+                        if el:
+                            w = re.sub(r"\?.*", "", el.get_attribute("href") or "")
+                            if w and "google" not in w:
+                                website = w
+                                break
+
+                    leads.append({
+                        "Name"       : name,
+                        "Rating"     : rating,
+                        "Reviews"    : reviews,
+                        "Category"   : category,
+                        "Phone"      : phone,
+                        "Website"    : website,
+                        "Address"    : address,
+                        "Google Maps": place_url.split("?")[0],
+                    })
+
+                    update_file(job_file, leads,
+                                f"⚡ Found {len(leads)} leads so far …",
+                                total=total)
+
                 except Exception:
                     continue
 
-                # Name
-                name = ""
-                for sel in ["h1.DUwDvf", "h1[class*='fontHeadline']", "h1"]:
-                    el = page.query_selector(sel)
-                    if el:
-                        name = (el.inner_text() or "").strip()
-                        if name:
-                            break
-                if not name or name in seen:
-                    continue
-                seen.add(name)
+            browser.close()
 
-                # Rating
-                rating = ""
-                for sel in ["div.F7nice span[aria-hidden='true']",
-                            "span.ceNzKf[aria-hidden='true']",
-                            "span[aria-hidden='true']"]:
-                    el = page.query_selector(sel)
-                    if el:
-                        t = (el.inner_text() or "").strip()
-                        if re.match(r"^\d[\d.]*$", t):
-                            rating = t
-                            break
-
-                # Reviews
-                reviews = 0
-                for sel in ["span[aria-label*='review']", "button[aria-label*='review']",
-                            "span[aria-label*='Rating']"]:
-                    el = page.query_selector(sel)
-                    if el:
-                        m = re.search(r"([\d,]+)", el.get_attribute("aria-label") or "")
-                        if m:
-                            reviews = int(m.group(1).replace(",", ""))
-                            break
-
-                # Category, address, phone, website
-                def get_text(sels):
-                    for s in sels:
-                        el = page.query_selector(s)
-                        if el:
-                            t = (el.inner_text() or "").strip()
-                            if t:
-                                return t
-                    return ""
-
-                category = get_text(["button.DkEaL", "span.mgr77e", "button[jsaction*='category']"])
-                address  = get_text(["button[data-item-id='address'] .rogA2c",
-                                     "button[data-item-id='address']",
-                                     "[data-tooltip='Copy address']"])
-                phone    = get_text(["button[data-item-id*='phone'] .rogA2c",
-                                     "button[data-item-id*='phone']",
-                                     "[data-tooltip='Copy phone number']"])
-
-                website = ""
-                for sel in ["a[data-item-id='authority']", "a[aria-label*='ebsite']",
-                            "a[data-tooltip='Open website']"]:
-                    el = page.query_selector(sel)
-                    if el:
-                        w = re.sub(r"\?.*", "", el.get_attribute("href") or "")
-                        if w and "google" not in w:
-                            website = w
-                            break
-
-                leads.append({
-                    "Name"       : name,
-                    "Rating"     : rating,
-                    "Reviews"    : reviews,
-                    "Category"   : category,
-                    "Phone"      : phone,
-                    "Website"    : website,
-                    "Address"    : address,
-                    "Google Maps": place_url.split("?")[0],
-                })
-
-                update_file(job_file, leads,
-                            f"⚡ Found {len(leads)} leads so far …",
-                            total=total)
-
-            except Exception:
-                continue
-
-        browser.close()
+    except Exception as e:
+        # Write the actual error to the job file so we can see it in the UI
+        update_file(job_file, leads,
+                    f"❌ Scraper error: {e}",
+                    status="done", total=len(leads))
+        return
 
     update_file(job_file, leads,
                 f"✅ Done! Found {len(leads)} leads.",
