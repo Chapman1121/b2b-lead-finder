@@ -15,56 +15,35 @@ from pathlib import Path
 
 import streamlit as st
 
+# ─── Install Playwright browser on first boot (needed on Streamlit Cloud) ────
+@st.cache_resource
+def _install_playwright_browser():
+    result = subprocess.run(
+        [sys.executable, "-m", "playwright", "install", "--with-deps", "chromium"],
+        capture_output=True, text=True
+    )
+    return result.returncode
+
+_install_playwright_browser()
+
 # ─── Config ───────────────────────────────────────────────────────────────────
 HISTORY_FILE = Path(__file__).parent / "history.json"
 RESULTS_DIR  = Path(__file__).parent / "results"
 
 LOCATIONS = {
     "Singapore": [
-        "Singapore",
-        "Central Region",
-        "East Region",
-        "North Region",
-        "North-East Region",
-        "West Region",
-        "Orchard",
-        "Marina Bay",
-        "Tanjong Pagar",
-        "Bugis",
-        "Jurong",
-        "Tampines",
-        "Woodlands",
-        "Ang Mo Kio",
-        "Bishan",
-        "Clementi",
-        "Bedok",
-        "Pasir Ris",
-        "Punggol",
-        "Sengkang",
-        "Hougang",
-        "Serangoon",
-        "Buona Vista",
-        "Novena",
-        "Toa Payoh",
+        "Singapore", "Central Region", "East Region", "North Region",
+        "North-East Region", "West Region", "Orchard", "Marina Bay",
+        "Tanjong Pagar", "Bugis", "Jurong", "Tampines", "Woodlands",
+        "Ang Mo Kio", "Bishan", "Clementi", "Bedok", "Pasir Ris",
+        "Punggol", "Sengkang", "Hougang", "Serangoon", "Buona Vista",
+        "Novena", "Toa Payoh",
     ],
     "Malaysia": [
-        "Malaysia",
-        "Kuala Lumpur",
-        "Selangor",
-        "Johor",
-        "Penang",
-        "Perak",
-        "Sabah",
-        "Sarawak",
-        "Pahang",
-        "Negeri Sembilan",
-        "Melaka",
-        "Kedah",
-        "Kelantan",
-        "Terengganu",
-        "Perlis",
-        "Putrajaya",
-        "Labuan",
+        "Malaysia", "Kuala Lumpur", "Selangor", "Johor", "Penang",
+        "Perak", "Sabah", "Sarawak", "Pahang", "Negeri Sembilan",
+        "Melaka", "Kedah", "Kelantan", "Terengganu", "Perlis",
+        "Putrajaya", "Labuan",
     ],
 }
 
@@ -93,6 +72,62 @@ def save_history(query, country, leads):
             return
     history.insert(0, entry)
     HISTORY_FILE.write_text(json.dumps(history[:30], indent=2, ensure_ascii=False), encoding="utf-8")
+
+# ─── AI Commentary ────────────────────────────────────────────────────────────
+def ai_msg(text, ts=None):
+    """Append a message to the AI feed in session state."""
+    if "ai_feed" not in st.session_state:
+        st.session_state.ai_feed = []
+    st.session_state.ai_feed.append({
+        "text": text,
+        "time": ts or datetime.datetime.now().strftime("%H:%M:%S"),
+    })
+
+def ai_insights(leads, query, location):
+    """Generate smart commentary from the scraped leads data."""
+    n = len(leads)
+    if n == 0:
+        return f"Searched for **{query}** in **{location}** but came up empty. Google Maps might not have many listings for that category there — try a broader search term."
+
+    df = pd.DataFrame(leads)
+
+    has_phone   = int(df["Phone"].astype(str).str.len().gt(2).sum())
+    has_website = int(df["Website"].astype(str).str.len().gt(4).sum())
+    has_both    = int((df["Phone"].astype(str).str.len().gt(2) & df["Website"].astype(str).str.len().gt(4)).sum())
+    no_contact  = n - int((df["Phone"].astype(str).str.len().gt(2) | df["Website"].astype(str).str.len().gt(4)).sum())
+
+    # Top rated
+    rated = df[df["Rating"].astype(str).str.match(r"^\d")]
+    top_name, top_rating, top_reviews = "", "", 0
+    if not rated.empty:
+        rated = rated.copy()
+        rated["_r"] = pd.to_numeric(rated["Rating"], errors="coerce")
+        best = rated.sort_values("_r", ascending=False).iloc[0]
+        top_name    = best["Name"]
+        top_rating  = best["Rating"]
+        top_reviews = best.get("Reviews", 0)
+
+    # Most reviewed
+    most_reviewed_name, most_reviews = "", 0
+    if "Reviews" in df.columns:
+        mx = df.loc[pd.to_numeric(df["Reviews"], errors="coerce").fillna(0).idxmax()]
+        most_reviewed_name = mx["Name"]
+        most_reviews       = int(mx["Reviews"]) if str(mx["Reviews"]).isdigit() else 0
+
+    lines = []
+    lines.append(f"✅ Scraped **{n} {query}** in **{location}**.")
+    lines.append(f"📞 **{has_phone}** have a phone number · 🌐 **{has_website}** have a website · 📞🌐 **{has_both}** have both.")
+    if no_contact > 0:
+        lines.append(f"🎯 **{no_contact}** businesses have no online presence — prime cold outreach targets.")
+    if top_name:
+        lines.append(f"⭐ Top rated: **{top_name}** ({top_rating}★{f', {top_reviews} reviews' if top_reviews else ''})")
+    if most_reviewed_name and most_reviews > 0:
+        lines.append(f"💬 Most reviewed: **{most_reviewed_name}** with **{most_reviews}** reviews.")
+    phone_pct = round(has_phone / n * 100)
+    web_pct   = round(has_website / n * 100)
+    lines.append(f"📊 Contact coverage: {phone_pct}% have phones, {web_pct}% have websites.")
+
+    return "\n\n".join(lines)
 
 # ─── Excel helper ─────────────────────────────────────────────────────────────
 @st.cache_data
@@ -125,7 +160,6 @@ def to_excel(records):
     return buf.getvalue()
 
 def read_job(job_id):
-    """Read the current state of a job from its JSON file."""
     job_file = RESULTS_DIR / f"{job_id}.json"
     if not job_file.exists():
         return None
@@ -140,6 +174,29 @@ st.markdown("""
 <style>
   [data-testid="stSidebar"] { background: #161628; }
   .block-container { padding-top: 1.5rem; }
+  .ai-bubble {
+      background: #1e1e38;
+      border-left: 3px solid #4361EE;
+      border-radius: 6px;
+      padding: 10px 12px;
+      margin-bottom: 10px;
+      font-size: 0.82rem;
+      line-height: 1.5;
+      color: #c9cfe8;
+  }
+  .ai-time {
+      font-size: 0.7rem;
+      color: #555a7a;
+      margin-bottom: 4px;
+  }
+  .ai-header {
+      color: #4361EE;
+      font-weight: 700;
+      font-size: 0.78rem;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+      margin-bottom: 8px;
+  }
 </style>""", unsafe_allow_html=True)
 
 # Session state defaults
@@ -150,6 +207,8 @@ for k, v in {
     "running"   : False,
     "proc_pid"  : None,
     "total"     : 0,
+    "ai_feed"   : [],
+    "last_n"    : 0,
 }.items():
     if k not in st.session_state:
         st.session_state[k] = v
@@ -159,6 +218,7 @@ with st.sidebar:
     st.markdown("## 🔍 B2B Lead Finder")
     st.caption("Google Maps · Live Scraper")
     st.divider()
+
     st.markdown("**Previous Searches**")
     history = load_history()
     if not history:
@@ -172,6 +232,19 @@ with st.sidebar:
                 st.session_state.job_id  = None
                 st.session_state.status  = f"✅ Loaded: **{h['query']}** in {h['country']} — {h['count']} leads"
                 st.rerun()
+
+    # ── AI Feed ───────────────────────────────────────────────────────────────
+    if st.session_state.ai_feed:
+        st.divider()
+        st.markdown('<div class="ai-header">🤖 AI Assistant</div>', unsafe_allow_html=True)
+        for msg in reversed(st.session_state.ai_feed[-6:]):  # show latest 6
+            st.markdown(
+                f'<div class="ai-bubble">'
+                f'<div class="ai-time">{msg["time"]}</div>'
+                f'{msg["text"]}'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
 
 # ── Header ────────────────────────────────────────────────────────────────────
 st.markdown("## B2B Lead Finder")
@@ -197,7 +270,6 @@ table_ph    = st.empty()
 
 # ── Stop ──────────────────────────────────────────────────────────────────────
 if stop_btn and st.session_state.running:
-    # Kill the subprocess if we still have its PID
     if st.session_state.proc_pid:
         try:
             import os, signal
@@ -206,6 +278,9 @@ if stop_btn and st.session_state.running:
             pass
     st.session_state.running = False
     st.session_state.status  = "⏹ Stopped."
+    n = len(st.session_state.leads)
+    if n:
+        ai_msg(f"⏹ Search stopped early. Collected **{n}** leads so far.")
     st.rerun()
 
 # ── Start ─────────────────────────────────────────────────────────────────────
@@ -216,7 +291,6 @@ if start_btn and query and not st.session_state.running:
     worker = Path(__file__).parent / "scraper_worker.py"
     proc = subprocess.Popen(
         [sys.executable, str(worker), query, location, job_id],
-        # No stdout/stderr pipes — let it run truly independently
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
@@ -227,6 +301,9 @@ if start_btn and query and not st.session_state.running:
     st.session_state.proc_pid = proc.pid
     st.session_state.status   = "🌐 Starting scraper …"
     st.session_state.total    = 80
+    st.session_state.last_n   = 0
+
+    ai_msg(f"🔍 Starting search for **{query}** in **{location}**. Opening Google Maps and waiting for results…")
     st.rerun()
 
 # ── Poll running job ──────────────────────────────────────────────────────────
@@ -235,7 +312,6 @@ if st.session_state.running and st.session_state.job_id:
     data   = read_job(job_id)
 
     if data is None:
-        # File not written yet — still starting up
         status_ph.info("🌐 Starting scraper …")
         time.sleep(1)
         st.rerun()
@@ -251,12 +327,29 @@ if st.session_state.running and st.session_state.job_id:
         n   = len(leads)
         pct = min(n / total, 1.0) if total else 0
 
+        # Milestone AI messages during scraping
+        prev_n = st.session_state.last_n
+        if total > 0 and prev_n == 0 and n == 0 and "listings" in message.lower():
+            ai_msg(f"📌 Found **{total} listings** on Google Maps. Starting to extract details for each one…")
+        if prev_n < 10 <= n:
+            ai_msg(f"⚡ First 10 leads extracted! Looking good so far — **{total - n}** more to go.")
+        if prev_n < 25 <= n:
+            ai_msg(f"📈 25 leads in. Scraper is running smooth — keeping at it.")
+        if prev_n < 50 <= n:
+            ai_msg(f"🔥 50 leads and counting. This is a busy area for **{query}**!")
+        if prev_n < 75 <= n:
+            ai_msg(f"💪 75 leads extracted. Almost there!")
+        st.session_state.last_n = n
+
         if done:
             st.session_state.running = False
             st.session_state.job_id  = None
             progress_ph.empty()
             status_ph.success(f"✅ Done! Found **{n}** leads for **{query}** in **{location}**")
             save_history(query, location, leads)
+            # Final AI insight summary
+            if leads:
+                ai_msg(ai_insights(leads, query, location))
         else:
             status_ph.info(message or f"⚡ Scraping … **{n}** leads found so far")
             if n > 0:
