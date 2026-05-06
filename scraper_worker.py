@@ -161,8 +161,15 @@ def main(query, location, job_id):
                 try:
                     page.wait_for_selector("div[role='feed']", timeout=15000)
                 except Exception:
+                    page_title = page.title()
+                    page_url   = page.url
+                    # Grab first 300 chars of page text for diagnosis
+                    try:
+                        page_text = page.evaluate("() => document.body.innerText").strip()[:300]
+                    except Exception:
+                        page_text = "(could not read page)"
                     update_file(job_file, leads,
-                                f"❌ Could not load results. URL: {page.url}",
+                                f"❌ Feed not found. Title: '{page_title}' | URL: {page_url} | Page text: {page_text}",
                                 status="done")
                     browser.close()
                     return
@@ -214,8 +221,14 @@ def main(query, location, job_id):
             update_file(job_file, leads, f"📌 Found {total} listings. Extracting …", total=total)
 
             if total == 0:
+                page_title = page.title()
+                page_url   = page.url
+                try:
+                    page_text = page.evaluate("() => document.body.innerText").strip()[:300]
+                except Exception:
+                    page_text = "(could not read)"
                 update_file(job_file, leads,
-                            f"❌ Found 0 listings. Page title: {page.title()}",
+                            f"❌ 0 listings. Title: '{page_title}' | URL: {page_url} | Text: {page_text}",
                             status="done")
                 browser.close()
                 return

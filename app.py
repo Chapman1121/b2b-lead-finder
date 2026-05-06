@@ -345,11 +345,17 @@ if st.session_state.running and st.session_state.job_id:
             st.session_state.running = False
             st.session_state.job_id  = None
             progress_ph.empty()
-            status_ph.success(f"✅ Done! Found **{n}** leads for **{query}** in **{location}**")
-            save_history(query, location, leads)
-            # Final AI insight summary
-            if leads:
+            is_error = message.startswith("❌") or message.startswith("⚠️")
+            if n > 0:
+                status_ph.success(f"✅ Done! Found **{n}** leads for **{query}** in **{location}**")
+                save_history(query, location, leads)
                 ai_msg(ai_insights(leads, query, location))
+            elif is_error:
+                status_ph.error(f"{message}")
+                ai_msg(f"⚠️ Search ended with an issue: {message}")
+            else:
+                status_ph.warning(f"⚠️ Done but found **0 leads** for **{query}** in **{location}**. Last status: _{message}_")
+                ai_msg(f"🤔 Came back empty for **{query}** in **{location}**. Last status from scraper: _{message}_")
         else:
             status_ph.info(message or f"⚡ Scraping … **{n}** leads found so far")
             if n > 0:
